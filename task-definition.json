@@ -1,0 +1,74 @@
+{
+	"family": "flaskapi",
+	"taskRoleArn": $TASK_ROLE_ARN,
+	"executionRoleArn": $EXECUTION_ROLE_ARN,
+	"requiresCompatibilities": [ "FARGATE" ],
+	"networkMode": "awsvpc",
+	"cpu": "256",
+	"memory": "512",
+	"containerDefinitions": [ {
+			"essential": true,
+			"image": "906394416424.dkr.ecr.us-east-1.amazonaws.com/aws-for-fluent-bit:latest",
+			"name": "log_router",
+			"environment": [ {
+				"name": "FLB_LOG_LEVEL",
+				"value": "debug"
+			} ],
+			"firelensConfiguration": {
+				"type": "fluentbit",
+				"options": {
+					"config-file-type": "s3",
+					"config-file-value": "arn:aws:s3:::yourbucket/yourdirectory/extra.conf"
+				}
+			},
+			"logConfiguration": {
+				"logDriver": "awslogs",
+				"options": {
+					"awslogs-group": $SERVICE_LOG_GROUP,
+					"awslogs-region": "ap-southeast-2",
+					"awslogs-create-group": "true",
+					"awslogs-stream-prefix": "firelens"
+				}
+			},
+			"memoryReservation": 50
+		}, {
+			"essential": true,
+			"name": "app",
+			"image": $APP_IMAGE,
+			"portMappings": [ {
+				"containerPort": 3000,
+				"hostPort": 3000,
+				"protocol": "tcp"
+			} ],
+			"logConfiguration": {
+				"logDriver": "awsfirelens",
+				"options": {
+					"awslogs-group": $SERVICE_LOG_GROUP,
+					"awslogs-region": "ap-southeast-2",
+					"awslogs-stream-prefix": "api-container"
+				}
+			}
+		},
+		{
+			"name": "xray-daemon",
+			"image": "amazon/aws-xray-daemon",
+			"user": "1337",
+			"essential": true,
+			"cpu": 32,
+			"memoryReservation": 256,
+			"portMappings": [ {
+				"hostPort": 2000,
+				"containerPort": 2000,
+				"protocol": "udp"
+			} ],
+			"logConfiguration": {
+				"logDriver": "awslogs",
+				"options": {
+					"awslogs-group": $SERVICE_LOG_GROUP,
+					"awslogs-region": "ap-southeast-2",
+					"awslogs-stream-prefix": "api-xray"
+				}
+			}
+		}
+	]
+}

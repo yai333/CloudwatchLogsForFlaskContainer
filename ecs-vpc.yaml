@@ -1,0 +1,246 @@
+Description: >
+  A stack for deploying containerized applications in AWS Fargate.
+  This stack runs containers in private VPC subnets, and includes a
+  private facing load balancer to register the services in.
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+    Default: flask
+
+  ECSServiceLogGroupRetentionInDays:
+    Type: Number
+    Default: 30
+
+  ECSServicesDomain:
+    Type: String
+    Description: "Domain name registerd under Route-53 that will be used for Service Discovery"
+    Default: flask.sample
+
+Mappings:
+  SubnetConfig:
+    VPC:
+      CIDR: "10.0.0.0/16"
+    PrivateOne:
+      CIDR: '10.0.2.0/24'
+    PrivateTwo:
+      CIDR: '10.0.3.0/24'
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: !FindInMap ["SubnetConfig", "VPC", "CIDR"]
+
+  PrivateSubnetOne:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 0
+          - Fn::GetAZs: { Ref: "AWS::Region" }
+      VpcId: !Ref "VPC"
+      CidrBlock: !FindInMap ["SubnetConfig", "PrivateOne", "CIDR"]
+
+  PrivateSubnetTwo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone:
+        Fn::Select:
+          - 1
+          - Fn::GetAZs: { Ref: "AWS::Region" }
+      VpcId: !Ref "VPC"
+      CidrBlock: !FindInMap ["SubnetConfig", "PrivateTwo", "CIDR"]
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref "VPC"
+  PrivateSubnetOneRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetOne
+      RouteTableId: !Ref PublicRouteTable
+  PrivateSubnetTwoRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetTwo
+      RouteTableId: !Ref PrivateRouteTable
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref EnvironmentName
+
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "30"
+
+  TargetGroupPublic:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      TargetType: ip
+      HealthCheckIntervalSeconds: 6
+      HealthCheckPath: /ping
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: "api"
+      Port: 3000
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - PublicLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref "TargetGroupPublic"
+          Type: "forward"
+      LoadBalancerArn: !Ref "PublicLoadBalancer"
+      Port: 80
+      Protocol: HTTP
+
+  TaskIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/CloudWatchFullAccess
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+
+  TaskExecutionIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": { "Service": [ "ecs-tasks.amazonaws.com" ]},
+                "Action": [ "sts:AssumeRole" ]
+            }]
+        }
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ecr:GetAuthorizationToken"
+                  - "ecr:BatchCheckLayerAvailability"
+                  - "ecr:GetDownloadUrlForLayer"
+                  - "ecr:GetRepositoryPolicy"
+                  - "ecr:DescribeRepositories"
+                  - "ecr:ListImages"
+                  - "ecr:DescribeImages"
+                  - "ecr:BatchGetImage"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: "*"
+              - Effect: Allow
+                Acction:
+                  - "s3:GetObject"
+                Resource": [
+                  "arn:aws:s3:::flash-api/fluntbit.conf"
+                ]
+
+  ECSServiceLogGroup:
+    Type: "AWS::Logs::LogGroup"
+    Properties:
+      RetentionInDays:
+        Ref: ECSServiceLogGroupRetentionInDays
+  ELBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticloadbalancing"
+      VpcEndpointType: "Interface"
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds:
+        - !Ref EndpointSG
+  EndpointSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Traffic into LoadBalancer Endpoint"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: EndpointSG
+Outputs:
+  Cluster:
+    Description: A reference to the ECS cluster
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${EnvironmentName}:ECSCluster"
+  ECSServiceLogGroup:
+    Description: Log group for services to publish logs
+    Value: !Ref ECSServiceLogGroup
+    Export:
+      Name: !Sub "${EnvironmentName}:ECSServiceLogGroup"
+  PublicLoadBalancerSG:
+    Description: Log group for public LoadBalancer
+    Value: !Ref PublicLoadBalancerSG
+    Export:
+      Name: !Sub "${EnvironmentName}:PublicLoadBalancerSG"
+  TaskExecutionIamRoleArn:
+    Description: Task Executin IAM role used by ECS tasks
+    Value: { "Fn::GetAtt": TaskExecutionIamRole.Arn }
+    Export:
+      Name: !Sub "${EnvironmentName}:TaskExecutionIamRoleArn"
+  TaskIamRoleArn:
+    Description: IAM role to be used by ECS task
+    Value: { "Fn::GetAtt": TaskIamRole.Arn }
+    Export:
+      Name: !Sub "${EnvironmentName}:TaskIamRoleArn"
+  PublicListener:
+    Description: The ARN of the public load balancer's Listener
+    Value: !Ref PublicLoadBalancerListener
+    Export:
+      Name: !Sub "${EnvironmentName}:PublicListener"
+  VPCId:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref "VPC"
+    Export:
+      Name: !Sub "${EnvironmentName}:VPCId"
+  PrivateSubnetOne:
+    Description: Public subnet one
+    Value: !Ref "PublicSubnetOne"
+    Export:
+      Name: !Sub "${EnvironmentName}:PublicSubnetOne"
+  PrivateSubnetTwo:
+    Description: Public subnet two
+    Value: !Ref "PublicSubnetTwo"
+    Export:
+      Name: !Sub "${EnvironmentName}:PublicSubnetTwo"
+  TargetGroupPublic:
+    Description: ALB public target group
+    Value: !Ref "TargetGroupPublic"
+    Export:
+      Name: !Sub "${EnvironmentName}:TargetGroupPublic"
+  ELBEndpoint:
+    Value: !Ref "ELBEndpoint"
+    Export:
+      Name: !Sub "${EnvironmentName}:ELBEndpoint"

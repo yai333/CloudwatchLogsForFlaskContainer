@@ -1,0 +1,50 @@
+Parameters:
+  EnvironmentName:
+    Type: String
+    Description: Environment name that joins all the stacks
+    Default: flask
+
+  ApiTaskDefinition:
+    Type: String
+    Description: Task definition for Api v1
+
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+Resources:
+  ECSServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group for the service"
+      VpcId:
+        "Fn::ImportValue": !Sub "${EnvironmentName}:VPCId"
+      SecurityGroupIngress:
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: -1
+
+  ApiService:
+    DependsOn:
+      - "Fn::ImportValue": !Sub "${EnvironmentName}:ELBEndpoint"
+    Type: "AWS::ECS::Service"
+    Properties:
+      ServiceName: "api"
+      Cluster:
+        "Fn::ImportValue": !Sub "${EnvironmentName}:ECSCluster"
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: 1
+      LaunchType: FARGATE
+      ServiceRegistries:
+        - RegistryArn:
+            "Fn::GetAtt": ApiServiceDiscoveryRecord.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          SecurityGroups:
+            - !Ref ECSServiceSecurityGroup
+          Subnets:
+            - "Fn::ImportValue": !Sub "${EnvironmentName}:PrivateSubnetOne"
+            - "Fn::ImportValue": !Sub "${EnvironmentName}:PrivateSubnetTwo"
+      TaskDefinition: { Ref: ApiV1TaskDefinition }
